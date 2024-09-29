@@ -1,0 +1,190 @@
+clear;
+close all;
+
+%% Add path to the databases folder
+addpath('../Datasets')
+
+%% Exploration and visualization options
+% Normalize dimensions
+normalizeData = true;
+
+% Specify which benchmark we want to explore
+% A list containing the indices in order to refer to the benchNames
+% entries.
+% We used a list in order to run explorations over different benchmarks.
+% The benchmarksList should contain only the indices of the benchmark for
+% which we want to perform the exploration.
+benchmarksList = [1];
+% benchmarksList = [1,2,3,4,5];
+benchNames = {'ChenIDCt';'Autocorrelation';'adpcmEncode';'adpcmDecode';'reflectionCoeff'};
+
+% Specify number of exploration to run (final results are averaged)
+nOfExplorations = 1;
+
+% Specify initial sampling techniques, if 0 it uses a probabilistic
+% (beta distribution) sampling, 1 for a random sampling
+samplingStrategy = 0;
+
+% Specify how many sample to perform before the exploration (in percentage
+% respect to the total number of configuration). Put the sizes inside a
+% list. This, in order to perfomr benchamrking changing the initial 
+% sampling size
+% E.g. to perform exploration for different percentage: 
+% initialSamplingPercentage = [2.5, 5, 10, 15, 20]; 
+initialSamplingPercentage = [15];
+
+% Specify a tradeoff between number of cluster to evaluate and how much to
+% prune. # of cluster limited by # of point/clustTradeOff. 
+% Lower trade-off = More clusters -> more pruning, less precision
+% Higher trade-off = Less clusters -> Less pruning, more precision
+% Requires a list stracture in order to perform benchmarking.
+clustTradeOffList = [15];
+% clustTradeOffList = [5,10,15,20];
+
+% Generates final plot with curves
+visualize_plots = true;
+
+% Storing output data in a folder ./explorations_results.
+% If the folder doesn't exists this will be created
+saveData = true;
+
+%% Exploration over different configurations
+for b=1:length(benchmarksList)
+    for p=1:length(initialSamplingPercentage)
+        for cTO=1:length(clustTradeOffList)
+            
+benchmarks = benchmarksList(b);
+percentage = initialSamplingPercentage(p);
+clustTradeOff = clustTradeOffList(cTO);
+
+%% Single exploration            
+%% Output dat file name
+datFileName = benchNames(benchmarks,1);
+datFileName = strcat('timed_',datFileName);
+datFileName = strcat(datFileName,'_expN',num2str(nOfExplorations));
+if samplingStrategy == 1
+    datFileName = strcat(datFileName,'_ted');
+else
+    if samplingStrategy == 0
+    	datFileName = strcat(datFileName,'_prob');
+    else
+	datFileName = strcat(datFileName,'_rand');
+    end
+end
+datFileName = strcat(datFileName,'_iS',num2str(percentage));
+datFileName = strcat(datFileName,'_cF',num2str(clustTradeOff));
+toPrint = strcat('Start with the creation of\t',datFileName{1},'\n');
+fprintf(toPrint);
+%% Retrive data from DB
+switch benchmarks
+    case 1
+        [data, featureSets, discretizedFeatureSets] = ChenIDctData(normalizeData);
+    case 2
+        [data, featureSets, discretizedFeatureSets] = AutocorrelationData(normalizeData);
+    case 3
+        [data, featureSets, discretizedFeatureSets] = adpcmEncodeData(normalizeData);
+    case 4
+        [data, featureSets, discretizedFeatureSets] = adpcmDecodeData(normalizeData);
+    case 5
+        [data, featureSets, discretizedFeatureSets] = reflectionCoefficientsData(normalizeData);
+end
+
+%% Sample data according to a random choice
+for nExp=1:nOfExplorations
+    nOfSamples = round(length(data)*percentage/100);
+
+        if samplingStrategy == 0
+            featureSample = extremeFeatureSampling(nOfSamples,discretizedFeatureSets, 0.2);
+            indx=ismember(data(:,3:end), featureSample,'rows');
+            sample = data(indx,:);
+        else
+            selected_data = datasample(data(:,3:end),nOfSamples,'Replace',false);
+            indx=ismember(data(:,3:end), selected_data,'rows');
+            sample = data(indx,:);
+        end
+    end
+
+    %% Compute first pareto information before starting the explroation
+    %% Start new DSE
+    startTime = tic();
+    [startADRS, onlineADRS, startingPP, finalPP, synthNum, sampledData] = clusterbased_expl(data, sample, featureSets, discretizedFeatureSets, normalizeData, clustTradeOff);
+    execTime = toc(startTime);
+    dataEvolution{nExp} = data;
+    sampledDataEvolution{nExp} = sampledData;
+    startingPPEvolution{nExp} = startingPP;
+    finalPPEvolution{nExp} = finalPP;
+    timeEvolutions{nExp} = transpose(execTime);
+    onlineADRSEvolution{nExp} = onlineADRS;
+    startingADRSEvolutions{nExp} = startADRS;
+    synthEvolution{nExp} = transpose(synthNum);
+end
+
+if visualize_plots
+    % Boxplot containing info about the explorations performed
+    figure
+    subplot(1,3,1)
+    finalADRS = [];
+    for a=1:size(onlineADRSEvolution,2)
+        finalADRS = [finalADRS; onlineADRSEvolution{a}(end)];
+    end
+    boxplot(finalADRS)
+    grid on
+    ylim([0 max([startingADRSEvolutions{:}])+max([startingADRSEvolutions{:}]/10)])
+    title('ADRS after DSE')
+
+    subplot(1,3,2)
+    boxplot([startingADRSEvolutions{:}])
+    grid on
+    ylim([0 max([startingADRSEvolutions{:}])+max([startingADRSEvolutions{:}]/10)])
+    title('ADRS before DSE')
+
+    subplot(1,3,3)
+    boxplot([synthEvolution{:}])
+    grid on
+    title('# of synthesis')
+
+    % Plot ADRS evolution with respect to # of synthesis, the curve ends at 40% of DS size
+    % that doesn't mean that 40% of design space has been synthesised
+    onlineADRS = [];
+    for i=1:length(onlineADRSEvolution)
+        adrsTmp = onlineADRSEvolution{i};
+        tmp = padarray(adrsTmp,length(data),adrsTmp(length(adrsTmp)),'post');
+        onlineADRS = [onlineADRS tmp(1:round(length(data)*40/100),1)];
+    end
+    meanOnlineADRS = [];
+    for i=1:size(onlineADRS,1)
+        meanOnlineADRS = [meanOnlineADRS; mean(onlineADRS(i,:))];
+    end
+    x = linspace(round(length(data)*percentage/100),round(length(data)*percentage/100)+round(length(data)*40/100),round(length(data)*40/100));
+    figure
+    hold on
+    grid on
+    plot(x,meanOnlineADRS,'linewidth',1)
+    xlabel('# of synthesis')
+    ylabel('mean ADRS')
+     
+    if nOfExplorations==1
+    % Plot exhaustive exploration with respect to synthesis performed and
+    % pareto frontier discovered
+        figure
+        hold on
+        grid on
+        scatter(dataEvolution{1}(:,1), dataEvolution{1}(:,2),'xr')
+        scatter(sampledDataEvolution{1}(:,1), sampledDataEvolution{1}(:,2),'oc', 'filled')
+        scatter(finalPPEvolution{1}(:,1), finalPPEvolution{1}(:,2),'ob', 'filled')
+        xlabel('latency')
+        ylabel('area')
+    end
+end
+
+if saveData
+    if exist('./explorations_results','dir') == 0
+       mkdir('./explorations_results')
+    end
+    char(strcat('./',datFileName,'.mat'));
+    save(char(strcat('./explorations_results/',datFileName,'.mat')));
+end
+
+        end
+    end
+end
